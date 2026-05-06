@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: tldr-video-api
+    runtime: docker
+    repo: https://github.com/your-username/tldr-video-tool
+    plan: free
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false  # La inserisci tu nella dashboard di Render
+      - key: N8N_WEBHOOK_URL
+        value: https://n8n.luigipesante.com/webhook/tldr-video
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 2
+    healthCheckPath: /api/status/test

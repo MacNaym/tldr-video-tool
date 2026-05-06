@@ -1,0 +1,105 @@
+{
+  "name": "TL;DR Video Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tldr-webhook",
+        "responseMode": "responseNode"
+      },
+      "name": "Webhook TL;DR",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "tldr-video"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-1",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "Completato?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.body.data.email || 'tuo@email.com' }}",
+        "subject": "✅ TL;DR Pronto - {{ $json.body.data.title || 'Video Processato' }}",
+        "text": "Il riassunto del tuo video è pronto!\n\nJob ID: {{ $json.body.job_id }}\nTitolo: {{ $json.body.data.title || 'N/A' }}\nParole transcript: {{ $json.body.data.word_count || 'N/A' }}\n\nAccedi a: https://tldr.luigipesante.com/result?id={{ $json.body.job_id }}",
+        "options": {}
+      },
+      "name": "Email Notifica",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.body.data.telegram_chat_id }}",
+        "text": "✅ *TL;DR Pronto*\n\n📹 {{ $json.body.data.title || 'Video' }}\n📝 {{ $json.body.data.word_count || '?' }} parole\n\n[Visualizza Risultato](https://tldr.luigipesante.com/result?id={{ $json.body.job_id }})",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Telegram Notifica",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [650, 400]
+    }
+  ],
+  "connections": {
+    "Webhook TL;DR": {
+      "main": [
+        [
+          {
+            "node": "Completato?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Completato?": {
+      "main": [
+        [
+          {
+            "node": "Email Notifica",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram Notifica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": []
+}
