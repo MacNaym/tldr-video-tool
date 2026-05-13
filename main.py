@@ -10,12 +10,9 @@ from datetime import datetime
 import requests
 import subprocess
 import re
+import tempfile
 
-# YouTube transcript
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
-
-app = FastAPI(title="TL;DR Video Processor", version="1.1.0")
+app = FastAPI(title="TL;DR Video Processor", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,28 +56,112 @@ def extract_youtube_id(url: str) -> str:
             return match.group(1)
     return None
 
-def get_youtube_transcript(video_id: str, language: str = None) -> tuple:
-    """Estrae transcript da YouTube. Ritorna (testo, lingua_trovata)"""
+def get_youtube_transcript_ytdlp(video_id: str) -> tuple:
+    """
+    Usa yt-dlp per estrarre i sottotitoli.
+    yt-dlp è più robusto di youtube-transcript-api contro i blocchi 429.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Lista delle lingue da provare (auto-detect)
+    languages = ["it", "en", "es", "fr", "de", "pt", "ja", "ko", "ru"]
+
+    for lang in languages:
+        try:
+            # yt-dlp scarica solo i subtitle, non il video
+            cmd = [
+                "yt-dlp",
+                "--skip-download",
+                "--write-subs",
+                "--sub-langs", lang,
+                "--convert-subs", "srt",
+                "--output", f"/tmp/{video_id}_%(ext)s",
+                "--quiet",
+                "--no-warnings",
+                url
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            # Cerca il file .srt creato
+            srt_file = Path(f"/tmp/{video_id}_{lang}.srt")
+            if not srt_file.exists():
+                # yt-dlp a volte nomina diversamente
+                for f in Path("/tmp").glob(f"{video_id}*.srt"):
+                    srt_file = f
+                    break
+
+            if srt_file.exists():
+                # Leggi e pulisci il file SRT (togli i numeri e i timestamp)
+                with open(srt_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                # Pulizia SRT: rimuovi numeri sequenza, timestamp e linee vuote multiple
+                lines = content.split("\n")
+                transcript_lines = []
+                for line in lines:
+                    # Salta linee vuote, numeri, e timestamp tipo "00:00:01,000 --> 00:00:04,000"
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.isdigit():
+                        continue
+                    if "-->" in stripped and ":" in stripped:
+                        continue
+                    transcript_lines.append(stripped)
+
+                transcript = " ".join(transcript_lines)
+
+                # Pulisci file temporanei
+                for f in Path("/tmp").glob(f"{video_id}*"):
+                    f.unlink(missing_ok=True)
+
+                return transcript, lang
+
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception as e:
+            print(f"yt-dlp failed for {lang}: {e}")
+            continue
+
+    # Se nessuna lingua ha funzionato, prova i subtitle automatici (auto-generated)
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "--write-auto-subs",
+            "--sub-langs", "en,it,es,fr,de",
+            "--convert-subs", "srt",
+            "--output", f"/tmp/{video_id}_auto_%(ext)s",
+            "--quiet",
+            "--no-warnings",
+            url
+        ]
 
-        if language and language != "auto":
-            try:
-                transcript = transcript_list.find_transcript([language])
-            except:
-                transcript = transcript_list.find_transcript(["it", "en", "es", "fr", "de"])
-        else:
-            # Auto-detect: prendi il primo disponibile
-            transcript = transcript_list.find_transcript(["it", "en", "es", "fr", "de"])
+        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
-        fetched = transcript.fetch()
-        formatter = TextFormatter()
-        text = formatter.format_transcript(fetched)
-        detected_lang = transcript.language_code
-        return text, detected_lang
+        for f in Path("/tmp").glob(f"{video_id}_auto*.srt"):
+            with open(f, "r", encoding="utf-8") as file:
+                content = file.read()
+            lines = content.split("\n")
+            transcript_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.isdigit() or "-->" in stripped:
+                    continue
+                transcript_lines.append(stripped)
 
+            for temp_f in Path("/tmp").glob(f"{video_id}_auto*"):
+                temp_f.unlink(missing_ok=True)
+
+            return " ".join(transcript_lines), "auto"
     except Exception as e:
-        raise Exception(f"Impossibile estrarre il transcript: {str(e)}")
+        print(f"Auto-subs failed: {e}")
+
+    raise Exception(
+        "YouTube ha bloccato la richiesta (troppi accessi dall'IP di Render). "
+        "Prova con un altro video, oppure scarica il video e caricalo manualmente."
+    )
 
 def extract_audio(video_path: Path, output_path: Path):
     cmd = [
@@ -96,7 +177,6 @@ def transcribe_audio(audio_path: Path, language: str = None) -> tuple:
         if language and language != "auto":
             kwargs["language"] = language
         transcript = openai.audio.transcriptions.create(**kwargs)
-    # Whisper non ritorna lingua, assumiamo quella richiesta o "auto"
     return transcript, language or "auto"
 
 def generate_content(transcript: str, language: str = "it") -> dict:
@@ -189,7 +269,7 @@ FORMATO:
 
 @app.get("/api/status/test")
 async def health_check():
-    return {"status": "ok", "version": "1.1.0", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "version": "1.2.0", "timestamp": datetime.utcnow().isoformat()}
 
 @app.post("/api/process")
 async def process_video(
@@ -244,7 +324,7 @@ async def process_youtube(url: str = Form(...), language: str = Form("auto")):
         raise HTTPException(400, "URL YouTube non valido. Formati supportati: youtube.com/watch?v=...,youtu.be/...")
 
     try:
-        transcript, detected_lang = get_youtube_transcript(video_id, language)
+        transcript, detected_lang = get_youtube_transcript_ytdlp(video_id)
         results = generate_content(transcript, detected_lang or language)
 
         result_data = {
@@ -268,6 +348,8 @@ async def process_youtube(url: str = Form(...), language: str = Form("auto")):
 
         return result_data
 
+    except HTTPException:
+        raise
     except Exception as e:
         error_data = {"job_id": job_id, "status": "error", "error": str(e)}
         with open(RESULTS_DIR / f"{job_id}.json", "w") as f:
